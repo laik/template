@@ -1,0 +1,26 @@
+{
+  "age": 25,
+  "config": {
+    "debug": true,
+    "port": 8080
+  },
+  "name": "小李",
+  "users": [
+    {
+      "id": 1,
+      "name": "李四",
+      "profile": {
+        "age": 35,
+        "city": "北京"
+      }
+    },
+    {
+      "id": 2,
+      "name": "王五",
+      "profile": {
+        "age": 28,
+        "city": "上海"
+      }
+    }
+  ]
+}

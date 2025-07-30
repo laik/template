@@ -1,0 +1,19 @@
+config:
+    debug: true
+    port: 8080
+name: 最终测试
+newField: 测试值
+users:
+    - age: 18
+      id: 1
+      name: 开头用户
+      profile:
+        age: 35
+        city: 北京
+    - id: 2
+      name: 王五
+      profile:
+        age: 28
+        city: 上海
+    - id: 3
+      name: 123
