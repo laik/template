@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/sjson"
@@ -56,6 +58,163 @@ func processArrayPath(path string, modifiedJSON string) (string, error) {
 	return path, nil
 }
 
+// expandArrayRangePath expands array range paths like config.[*].sex or config.[0..1].sex
+func expandArrayRangePath(path string, jsonData string) ([]string, error) {
+	// Parse the path to get array path and field name
+	arrayPath, fieldName, err := parseArrayRangePath(path)
+	if err != nil {
+		// No array range found, return original path
+		return []string{path}, nil
+	}
+
+	// Find the array range pattern in the original path
+	arrayRangeRegex := regexp.MustCompile(`\[(\*|\d+(?:\.\.\d+)?(?:,\d+(?:\.\.\d+)?)*)\]`)
+	matches := arrayRangeRegex.FindStringSubmatch(path)
+	if len(matches) == 0 {
+		return []string{path}, nil
+	}
+
+	rangeExpr := matches[1]
+
+	if rangeExpr == "*" {
+		// Handle [*] - get all array indices
+		return getAllArrayIndices(arrayPath, jsonData, fieldName)
+	} else if strings.Contains(rangeExpr, ",") {
+		// Handle [0,1,2] or [0..1,2] - specific indices or mixed
+		return getSpecificIndices(arrayPath, rangeExpr, fieldName)
+	} else if strings.Contains(rangeExpr, "..") {
+		// Handle [0..1] - range expression
+		return getRangeIndices(arrayPath, rangeExpr, fieldName)
+	} else {
+		// Single index like [0]
+		index, err := strconv.Atoi(rangeExpr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid array index: %s", rangeExpr)
+		}
+		return []string{fmt.Sprintf("%s.%d.%s", arrayPath, index, fieldName)}, nil
+	}
+}
+
+// parseArrayRangePath parses a path like "config.[*].sex" and returns the array path and field name
+func parseArrayRangePath(path string) (arrayPath, fieldName string, err error) {
+	// Find the array range pattern
+	arrayRangeRegex := regexp.MustCompile(`\[(\*|\d+(?:\.\.\d+)?(?:,\d+(?:\.\.\d+)?)*)\]`)
+
+	matches := arrayRangeRegex.FindStringSubmatchIndex(path)
+	if len(matches) == 0 {
+		return "", "", fmt.Errorf("no array range found in path: %s", path)
+	}
+
+	// Extract the parts
+	arrayPath = path[:matches[0]]
+	fieldName = path[matches[1]:]
+
+	// Clean up the paths - remove trailing dot from arrayPath and leading dot from fieldName
+	arrayPath = strings.TrimSuffix(arrayPath, ".")
+	fieldName = strings.TrimPrefix(fieldName, ".")
+
+	return arrayPath, fieldName, nil
+}
+
+// getAllArrayIndices gets all indices for an array path
+func getAllArrayIndices(basePath string, jsonData string, suffix string) ([]string, error) {
+	var data interface{}
+	if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
+		return nil, err
+	}
+
+	// Navigate to the array
+	pathParts := strings.Split(basePath, ".")
+	current := data
+
+	for _, part := range pathParts {
+		if part == "" {
+			continue
+		}
+
+		switch v := current.(type) {
+		case map[string]interface{}:
+			if val, exists := v[part]; exists {
+				current = val
+			} else {
+				return nil, fmt.Errorf("path %s not found", basePath)
+			}
+		default:
+			return nil, fmt.Errorf("path %s is not an object", basePath)
+		}
+	}
+
+	// Check if current is an array
+	array, ok := current.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("path %s is not an array", basePath)
+	}
+
+	// Generate paths for all indices
+	var paths []string
+	for i := 0; i < len(array); i++ {
+		// For each array element, add the suffix field
+		paths = append(paths, fmt.Sprintf("%s.%d.%s", basePath, i, suffix))
+	}
+
+	return paths, nil
+}
+
+// getRangeIndices gets indices for a range expression like "0..1"
+func getRangeIndices(basePath, rangeExpr string, suffix string) ([]string, error) {
+	parts := strings.Split(rangeExpr, "..")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid range expression: %s", rangeExpr)
+	}
+
+	start, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid start index: %s", parts[0])
+	}
+
+	end, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid end index: %s", parts[1])
+	}
+
+	if start > end {
+		return nil, fmt.Errorf("start index %d is greater than end index %d", start, end)
+	}
+
+	var paths []string
+	for i := start; i <= end; i++ {
+		paths = append(paths, fmt.Sprintf("%s.%d.%s", basePath, i, suffix))
+	}
+
+	return paths, nil
+}
+
+// getSpecificIndices gets indices for specific indices like "0,1,2"
+func getSpecificIndices(basePath, indicesExpr string, suffix string) ([]string, error) {
+	parts := strings.Split(indicesExpr, ",")
+	var paths []string
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.Contains(part, "..") {
+			// Handle sub-ranges like "0..2" within "0,1..3,5"
+			subPaths, err := getRangeIndices(basePath, part, suffix)
+			if err != nil {
+				return nil, err
+			}
+			paths = append(paths, subPaths...)
+		} else {
+			index, err := strconv.Atoi(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid index: %s", part)
+			}
+			paths = append(paths, fmt.Sprintf("%s.%d.%s", basePath, index, suffix))
+		}
+	}
+
+	return paths, nil
+}
+
 func main() {
 	filePath := flag.String("f", "", "input YAML/JSON file")
 	outputFormat := flag.String("o", "yaml", "output format: yaml, json, or save (save to original file)")
@@ -81,6 +240,9 @@ func main() {
 		fmt.Println("Examples:")
 		fmt.Println("  ./injector -f data.yaml --set name=张三")
 		fmt.Println("  ./injector -f data.yaml --set users.0.id=100 --set users.0.name=李四")
+		fmt.Println("  ./injector -f data.yaml --set config.[*].sex=2")
+		fmt.Println("  ./injector -f data.yaml --set config.[0..1].sex=2")
+		fmt.Println("  ./injector -f data.yaml --set config.[0,2].sex=2")
 		fmt.Println("  ./injector -f data.yaml --insert newField=value")
 		fmt.Println("  ./injector -f data.yaml --delete oldField")
 		fmt.Println("  ./injector -f data.yaml --set name=张三 -o json")
@@ -128,22 +290,32 @@ func main() {
 		path := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 
-		// Process array insertion symbols
-		path, err = processArrayPath(path, modifiedJSON)
+		// Process array range paths like config.[*].sex or config.[0..1].sex
+		expandedPaths, err := expandArrayRangePath(path, modifiedJSON)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error processing path %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "Error expanding array range path %s: %v\n", path, err)
 			os.Exit(1)
 		}
 
-		// Wrap value in quotes if it's not valid JSON
-		if !json.Valid([]byte(value)) {
-			value = fmt.Sprintf("%q", value)
-		}
+		// Process each expanded path
+		for _, expandedPath := range expandedPaths {
+			// Process array insertion symbols
+			processedPath, err := processArrayPath(expandedPath, modifiedJSON)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error processing path %s: %v\n", expandedPath, err)
+				os.Exit(1)
+			}
 
-		modifiedJSON, err = sjson.SetRaw(modifiedJSON, path, value)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting %s: %v\n", path, err)
-			os.Exit(1)
+			// Wrap value in quotes if it's not valid JSON
+			if !json.Valid([]byte(value)) {
+				value = fmt.Sprintf("%q", value)
+			}
+
+			modifiedJSON, err = sjson.SetRaw(modifiedJSON, processedPath, value)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting %s: %v\n", processedPath, err)
+				os.Exit(1)
+			}
 		}
 	}
 
