@@ -1,24 +1,23 @@
-# Managing Node Exporter Certificates with Kubernetes Secrets
+Managing Node Exporter Certificates with Kubernetes Secrets
 
-Since v1.6.0, Prometheus Node Exporter officially supports native TLS and Basic Auth configuration through the `--web.config.file` parameter, eliminating the need for nginx or proxy sidecars.
+Since v1.6.0, Prometheus Node Exporter officially supports native TLS and Basic Auth configuration through the --web.config.file parameter, eliminating the need for nginx or proxy sidecars.
 
-✅ **Best Practice**: Use self-signed certificates + Node Exporter native TLS & Basic Auth support
+Best Practice: Use self-signed certificates + Node Exporter native TLS & Basic Auth support
 
-## 💡 Overview
+Overview
 
 We will:
 1. Manually create self-signed certificates and store them as Kubernetes Secrets
-2. Prepare a `web.config.yaml` file to configure TLS and Basic Auth
-3. Use Node Exporter parameter `--web.config.file=/etc/node_exporter/web.config.yaml` to enable authentication and HTTPS
+2. Prepare a web.config.yaml file to configure TLS and Basic Auth
+3. Use Node Exporter parameter --web.config.file=/etc/node_exporter/web.config.yaml to enable authentication and HTTPS
 4. Configure Basic Auth + TLS Scrape in Prometheus
 
-## 🔧 Detailed Steps
+Detailed Steps
 
-### 🧩 Step 1: Generate Self-Signed Certificates and Create Secrets
+Step 1: Generate Self-Signed Certificates and Create Secrets
 
 First, generate self-signed certificates locally:
 
-```bash
 # 1. Generate CA private key
 openssl genrsa -out ca.key 4096
 
@@ -85,32 +84,28 @@ kubectl create secret tls node-exporter-cert-secret \
   --cert=node-exporter.crt \
   --key=node-exporter.key \
   -n ${NAMESPACE}
-```
 
-### 🔐 Step 2: Create Basic Auth Password File (htpasswd)
+Step 2: Create Basic Auth Password File (htpasswd)
 
-```bash
-htpasswd -nbB admin secret
-# Output: admin:$2y$05$apbMB8B8.41BGhQKGla.IO.H3wd.4LpJY.UCsoBAAuPenuNRHj08y
+htpasswd -nbB ${USERNAME} ${PASSWORD}
+# Output: ${USERNAME}:${BCRYPT_HASH}
 
-echo -n "admin:secret" | base64
-# Output: YWRtaW46c2VjcmV0
+echo -n "${USERNAME}:${PASSWORD}" | base64
+# Output: ${BASE64_ENCODED_CREDENTIALS}
 
 kubectl delete secret node-exporter-basic-auth -n ${NAMESPACE} --ignore-not-found=true
 kubectl create secret generic node-exporter-basic-auth \
-  --from-literal=username=admin \
-  --from-literal=password='secret' \
+  --from-literal=username=${USERNAME} \
+  --from-literal=password='${PASSWORD}' \
   -n ${NAMESPACE}
-```
 
-### 📄 Step 3: Create web.config.yaml Configuration File as ConfigMap
+Step 3: Create web.config.yaml Configuration File as ConfigMap
 
-Create a `web-config.yaml` file with the following content:
+Create a web-config.yaml file with the following content:
 
-```bash
-# Generate bcrypt hash (password: secret)
-htpasswd -nbB admin secret
-# Output: admin:$2y$05$apbMB8B8.41BGhQKGla.IO.H3wd.4LpJY.UCsoBAAuPenuNRHj08y
+# Generate bcrypt hash (password: ${PASSWORD})
+htpasswd -nbB ${USERNAME} ${PASSWORD}
+# Output: ${USERNAME}:${BCRYPT_HASH}
 
 # Create web.config.yaml file
 cat > web-config.yaml << "EOF"
@@ -118,19 +113,17 @@ tls_server_config:
   cert_file: /etc/node_exporter/tls/tls.crt
   key_file: /etc/node_exporter/tls/tls.key
 basic_auth_users:
-  admin: $2y$05$apbMB8B8.41BGhQKGla.IO.H3wd.4LpJY.UCsoBAAuPenuNRHj08y
+  ${USERNAME}: ${BCRYPT_HASH}
 EOF
 
 # Create ConfigMap
 kubectl delete configmap node-exporter-web-config -n ${NAMESPACE} --ignore-not-found=true
 kubectl create configmap node-exporter-web-config --from-file=web.config.yaml=web-config.yaml -n ${NAMESPACE}
-```
 
-### 📦 Step 4: Mount Certificates & Config in Node Exporter
+Step 4: Mount Certificates & Config in Node Exporter
 
-If using Helm to install kube-prometheus-stack, add the following content to `values.yaml`:
+If using Helm to install kube-prometheus-stack, add the following content to values.yaml:
 
-```yaml
 nodeExporter:
   extraArgs:
     - --web.config.file=/etc/node_exporter/web.config.yaml
@@ -151,25 +144,21 @@ nodeExporter:
       mountPath: /etc/node_exporter/web.config.yaml
       subPath: web.config.yaml
       readOnly: true
-```
 
-⚠️ **Note**: When mountPath is a file, subPath is required.
+Note: When mountPath is a file, subPath is required.
 
-### 🚀 Helm Update Operations
+Helm Update Operations
 
-After saving the above configuration to the `values.yaml` file, use the following commands to update Node Exporter:
+After saving the above configuration to the values.yaml file, use the following commands to update Node Exporter:
 
-```bash
 # If installing for the first time
 helm install monitoring-operator prometheus-community/kube-prometheus-stack -f values.yaml
 
 # If already installed, update the configuration
 helm upgrade monitoring-operator prometheus-community/kube-prometheus-stack -f values.yaml
-```
 
 Check and confirm Helm update status:
 
-```bash
 # Check Helm release status
 helm status monitoring-operator
 
@@ -181,13 +170,11 @@ kubectl describe pod -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-e
 
 # Check Node Exporter logs
 kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
-```
 
 Ensure the Pod is running normally without error logs.
 
-### 🔍 Verification Steps
+Verification Steps
 
-```bash
 # 1. Check pod status
 kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
 
@@ -203,15 +190,13 @@ kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter 
 # 5. Test access
 kubectl port-forward -n ${NAMESPACE} svc/monitoring-operator-prometheus-node-exporter 9100:9100 &
 sleep 3
-curl -k -u admin:secret https://localhost:9100/metrics | head -5
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics | head -5
 pkill -f "kubectl port-forward"
-```
 
-### 📡 Step 5: Modify ServiceMonitor to Support Basic Auth + TLS
+Step 5: Modify ServiceMonitor to Support Basic Auth + TLS
 
-Create a `servicemonitor.yaml` file:
+Create a servicemonitor.yaml file:
 
-```yaml
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -237,58 +222,46 @@ spec:
   namespaceSelector:
     matchNames:
       - ${NAMESPACE}
-```
 
-**Note**: ServiceMonitor will be created automatically, no need to create manually. If customization is needed, create the above file.
+Note: ServiceMonitor will be created automatically, no need to create manually. If customization is needed, create the above file.
 
-## ✅ Success Indicators
+Success Indicators
 
-- You can access Node Exporter's port (e.g., `curl -k -u admin:secret https://<podIP>:9100/metrics`)
+- You can access Node Exporter's port (e.g., curl -k -u ${USERNAME}:${PASSWORD} https://<podIP>:9100/metrics)
 - Prometheus Targets page shows Node Exporter status as UP
 
-```bash
 # Test TLS + Basic Auth
-curl -k -u admin:secret https://localhost:9100/metrics
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics
 
 # Test TLS (should return 401 Unauthorized)
 curl -k https://localhost:9100/metrics
 
 # Port forward test
 kubectl port-forward -n ${NAMESPACE} svc/monitoring-operator-prometheus-node-exporter 9100:9100 &
-curl -k -u admin:secret https://localhost:9100/metrics
-```
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics
 
-## 🔧 Troubleshooting
+Troubleshooting
 
-### Common Issues
+Common Issues
 
-1. **bcrypt Error**:
-   ```
+1. bcrypt Error:
    crypto/bcrypt: bcrypt hashes must start with '$', but hashedSecret started with 'a'
-   ```
-   **Solution**: Ensure `basic_auth_users` only contains bcrypt hash values, not username prefixes.
+   Solution: Ensure basic_auth_users only contains bcrypt hash values, not username prefixes.
 
-2. **Health Check Failure**:
-   ```
+2. Health Check Failure:
    Readiness probe failed: HTTP probe failed with statuscode: 401
-   ```
-   **Solution**: Check if the Authorization header is correct, should be base64 encoded `admin:secret`.
+   Solution: Check if the Authorization header is correct, should be base64 encoded ${USERNAME}:${PASSWORD}.
 
-3. **Certificate Error**:
-   ```
+3. Certificate Error:
    TLS handshake error: client sent an HTTP request to an HTTPS server
-   ```
-   **Solution**: This is normal, indicating TLS is working, client needs to use HTTPS.
+   Solution: This is normal, indicating TLS is working, client needs to use HTTPS.
 
-4. **Helm Upgrade Not Effective**:
-   **Solution**: Delete all pods to let them recreate:
-   ```bash
+4. Helm Upgrade Not Effective:
+   Solution: Delete all pods to let them recreate:
    kubectl delete pods -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
-   ```
 
-### Verification Commands
+Verification Commands
 
-```bash
 # Check web.config.yaml content
 kubectl get configmap node-exporter-web-config -n ${NAMESPACE} -o jsonpath='{.data.web\.config\.yaml}'
 
@@ -296,27 +269,23 @@ kubectl get configmap node-exporter-web-config -n ${NAMESPACE} -o jsonpath='{.da
 kubectl get pod -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -o yaml | grep -A 2 "Authorization"
 
 # Test Basic Auth
-curl -k -u admin:secret https://localhost:9100/metrics
-```
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics
 
-## 🧰 Summary
+Summary
 
 | Feature | Supported | Implementation |
 |---------|-----------|----------------|
-| TLS Encryption | ✅ | Node Exporter native via web.config.yaml |
-| Basic Auth | ✅ | Built-in configuration |
-| Self-signed Certificate Management | ✅ | Manual creation and storage as Secret |
-| Helm Support | ✅ | extraArgs, extraVolumes, extraVolumeMounts |
+| TLS Encryption | Yes | Node Exporter native via web.config.yaml |
+| Basic Auth | Yes | Built-in configuration |
+| Self-signed Certificate Management | Yes | Manual creation and storage as Secret |
+| Helm Support | Yes | extraArgs, extraVolumes, extraVolumeMounts |
 
----
+Complete Operation Steps Verification
 
-## 🔍 Complete Operation Steps Verification
-
-### 📋 Pre-check Checklist
+Pre-check Checklist
 
 Before starting configuration, ensure the following environment is ready:
 
-```bash
 # 1. Check Kubernetes cluster status
 kubectl cluster-info
 kubectl get nodes
@@ -333,13 +302,11 @@ helm version
 which openssl
 which htpasswd
 which curl
-```
 
-### 🚀 Complete Verification Process
+Complete Verification Process
 
-#### Step 1: Certificate and Key Verification
+Step 1: Certificate and Key Verification
 
-```bash
 # Verify certificate files exist and are valid
 ls -la node-exporter.crt node-exporter.key ca.crt ca.key
 
@@ -351,11 +318,9 @@ openssl rsa -in node-exporter.key -check -noout
 
 # Verify certificate chain
 openssl verify -CAfile ca.crt node-exporter.crt
-```
 
-#### Step 2: Kubernetes Resource Verification
+Step 2: Kubernetes Resource Verification
 
-```bash
 # Verify Secret is correctly created
 kubectl get secret node-exporter-cert-secret -n ${NAMESPACE} -o yaml
 
@@ -367,11 +332,9 @@ kubectl get secret node-exporter-basic-auth -n ${NAMESPACE} -o yaml
 
 # Verify ConfigMap
 kubectl get configmap node-exporter-web-config -n ${NAMESPACE} -o yaml
-```
 
-#### Step 3: Helm Deployment Verification
+Step 3: Helm Deployment Verification
 
-```bash
 # Check Helm release status
 helm list -n ${NAMESPACE}
 helm status monitoring-operator -n ${NAMESPACE}
@@ -387,11 +350,9 @@ kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter 
 
 # Check if web.config.yaml is correctly mounted
 kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- cat /etc/node_exporter/web.config.yaml
-```
 
-#### Step 4: Service Verification
+Step 4: Service Verification
 
-```bash
 # Check if Service is correctly created
 kubectl get svc -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
 
@@ -400,11 +361,9 @@ kubectl describe svc -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-e
 
 # Check Endpoints
 kubectl get endpoints -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
-```
 
-#### Step 5: Function Verification
+Step 5: Function Verification
 
-```bash
 # 1. Port forward test
 kubectl port-forward -n ${NAMESPACE} svc/monitoring-operator-prometheus-node-exporter 9100:9100 &
 PF_PID=$!
@@ -418,11 +377,11 @@ curl -k -s -o /dev/null -w "%{http_code}" https://localhost:9100/metrics
 
 # 3. Test Basic Auth access
 echo "Testing Basic Auth access:"
-curl -k -u admin:secret https://localhost:9100/metrics | head -10
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics | head -10
 
 # 4. Test wrong password
 echo "Testing wrong password (should return 401):"
-curl -k -u admin:wrongpassword https://localhost:9100/metrics -s -o /dev/null -w "%{http_code}"
+curl -k -u ${USERNAME}:wrongpassword https://localhost:9100/metrics -s -o /dev/null -w "%{http_code}"
 
 # 5. Test HTTP access (should fail)
 echo "Testing HTTP access (should fail):"
@@ -430,11 +389,9 @@ curl -s http://localhost:9100/metrics -o /dev/null -w "%{http_code}" || echo "Co
 
 # Clean up port forward
 kill $PF_PID
-```
 
-#### Step 6: Prometheus Integration Verification
+Step 6: Prometheus Integration Verification
 
-```bash
 # Check if ServiceMonitor is correctly created
 kubectl get servicemonitor -n ${NAMESPACE}
 
@@ -456,11 +413,9 @@ echo "Node Exporter should show as UP status"
 curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job == "node-exporter")'
 
 kill %1
-```
 
-#### Step 7: Log and Monitoring Verification
+Step 7: Log and Monitoring Verification
 
-```bash
 # Check Node Exporter logs
 echo "=== Node Exporter Logs ==="
 kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter --tail=20
@@ -475,13 +430,11 @@ kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus --tail=20
 # Check Prometheus Operator logs
 echo "=== Prometheus Operator Logs ==="
 kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-operator --tail=20
-```
 
-### 🔧 Advanced Troubleshooting
+Advanced Troubleshooting
 
-#### Certificate Related Issues
+Certificate Related Issues
 
-```bash
 # Check if certificate is expired
 openssl x509 -in node-exporter.crt -noout -dates
 
@@ -491,24 +444,20 @@ openssl x509 -in node-exporter.crt -noout -text | grep -A 10 "Subject Alternativ
 # Verify certificate matches private key
 openssl x509 -noout -modulus -in node-exporter.crt | openssl md5
 openssl rsa -noout -modulus -in node-exporter.key | openssl md5
-```
 
-#### Network Connection Issues
+Network Connection Issues
 
-```bash
 # Check Pod network connection
-kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- curl -k -u admin:secret https://localhost:9100/metrics
+kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics
 
 # Check Service to Pod connection
-kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- curl -k -u admin:secret https://node-exporter.${NAMESPACE}.svc:9100/metrics
+kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- curl -k -u ${USERNAME}:${PASSWORD} https://node-exporter.${NAMESPACE}.svc:9100/metrics
 
 # Check DNS resolution
 kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- nslookup node-exporter.${NAMESPACE}.svc
-```
 
-#### Configuration Verification
+Configuration Verification
 
-```bash
 # Verify web.config.yaml syntax
 kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- cat /etc/node_exporter/web.config.yaml
 
@@ -517,41 +466,37 @@ kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter 
 
 # Verify mount points
 kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- mount | grep node_exporter
-```
 
-### 📊 Performance Monitoring
+Performance Monitoring
 
-```bash
 # Check Node Exporter metrics collection
-curl -k -u admin:secret https://localhost:9100/metrics | grep -E "(node_exporter_build_info|node_exporter_scrape_duration_seconds)"
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics | grep -E "(node_exporter_build_info|node_exporter_scrape_duration_seconds)"
 
 # Check memory usage
 kubectl top pods -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
 
 # Check CPU usage
 kubectl exec -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter -- cat /proc/cpuinfo | grep processor | wc -l
-```
 
-### 🎯 Success Criteria Checklist
+Success Criteria Checklist
 
 Complete the following checklist to confirm successful configuration:
 
-- [ ] Certificate and key files exist and are valid
-- [ ] Kubernetes Secret and ConfigMap correctly created
-- [ ] Node Exporter Pod is in Running state
-- [ ] Health checks pass (liveness and readiness probe)
-- [ ] HTTPS access requires authentication (returns 401)
-- [ ] Basic Auth authentication successful (returns metrics data)
-- [ ] HTTP access is rejected
-- [ ] Prometheus Targets page shows Node Exporter as UP
-- [ ] No error logs
-- [ ] Metrics data collection normal
+- Certificate and key files exist and are valid
+- Kubernetes Secret and ConfigMap correctly created
+- Node Exporter Pod is in Running state
+- Health checks pass (liveness and readiness probe)
+- HTTPS access requires authentication (returns 401)
+- Basic Auth authentication successful (returns metrics data)
+- HTTP access is rejected
+- Prometheus Targets page shows Node Exporter as UP
+- No error logs
+- Metrics data collection normal
 
-### 🚨 Emergency Recovery Steps
+Emergency Recovery Steps
 
 If configuration issues occur, follow these recovery steps:
 
-```bash
 # 1. Delete all related resources
 kubectl delete pods -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
 kubectl delete secret node-exporter-cert-secret -n ${NAMESPACE}
@@ -566,13 +511,11 @@ helm upgrade monitoring-operator prometheus-community/kube-prometheus-stack -f v
 
 # 4. Verify recovery
 kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
-```
 
-### 📝 Configuration Backup
+Configuration Backup
 
 Recommend regular backup of important configurations:
 
-```bash
 # Backup certificates and keys
 cp node-exporter.crt node-exporter.crt.backup
 cp node-exporter.key node-exporter.key.backup
@@ -586,24 +529,31 @@ kubectl get configmap node-exporter-web-config -n ${NAMESPACE} -o yaml > node-ex
 
 # Backup values.yaml
 cp values.yaml values.yaml.backup
-```
 
-## 🔍 Quick Verification Commands
+Quick Verification Commands
 
 For quick verification of the setup:
 
-```bash
 # Check Node Exporter status
 kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=prometheus-node-exporter
 
 # Test TLS + Basic Auth
 kubectl port-forward -n ${NAMESPACE} svc/monitoring-operator-prometheus-node-exporter 9100:9100 &
-curl -k -u admin:secret https://localhost:9100/metrics | head -5
+curl -k -u ${USERNAME}:${PASSWORD} https://localhost:9100/metrics | head -5
 pkill -f "kubectl port-forward"
 
 # Check Prometheus targets
 kubectl port-forward -n ${NAMESPACE} svc/monitoring-operator-kube-p-prometheus --address 0.0.0.0 9090:9090
 curl -s "http://192.168.5.200:9090/api/v1/targets" | jq -r '.data.activeTargets[] | select(.labels.job == "node-exporter") | "\(.labels.job) - \(.labels.instance) - \(.health) - \(.lastError)"'
-```
 
 This completes your comprehensive Node Exporter TLS + Basic Auth configuration solution!
+
+Variables Reference
+
+The following variables should be defined before executing the commands:
+
+${NAMESPACE} - The Kubernetes namespace where Node Exporter will be deployed
+${USERNAME} - The username for Basic Auth authentication
+${PASSWORD} - The password for Basic Auth authentication
+${BCRYPT_HASH} - The bcrypt hash of the password (generated by htpasswd)
+${BASE64_ENCODED_CREDENTIALS} - Base64 encoded username:password string
