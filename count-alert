@@ -1,0 +1,111 @@
+import requests
+import re
+import argparse
+from datetime import datetime, timedelta
+
+def fetch_rules(prom_url):
+    url = prom_url.rstrip('/') + '/api/v1/rules'
+    resp = requests.get(url)
+    resp.raise_for_status()
+    j = resp.json()
+    if j['status'] != 'success':
+        raise RuntimeError("Fetching rules failed: " + str(j))
+    return j['data']['groups']
+
+def extract_metric_matchers(expr):
+    """
+    用正则粗略提取 metric 名 +标签 matcher
+    返回列表 of tuple (metric_name, matcher_str)
+    matcher_str 是“{...}”部分（可能空字符串）
+    """
+    # 正则匹配 metric{name="value",...} 或 metric{...}
+    pattern = re.compile(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(\{[^}]*\})?')
+    matches = pattern.findall(expr)
+    results = []
+    for m in matches:
+        metric = m[0]
+        matcher = m[1] if m[1] else ''
+        results.append( (metric, matcher) )
+    return results
+
+def query_series(prom_url, metric, matcher, start, end):
+    """
+    调用 /api/v1/series 接口，返回匹配 metric+matcher 的 series 列表
+    """
+    # 构造 selector
+    selector = metric + matcher
+    params = {
+        'match[]': selector,
+        'start': start,
+        'end': end
+    }
+    url = prom_url.rstrip('/') + '/api/v1/series'
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    j = resp.json()
+    if j['status'] != 'success':
+        print(f"Warning: series query failed for selector {selector}: {j}")
+        return []
+    return j['data']
+
+def main():
+    parser = argparse.ArgumentParser(description="统计 alert rule 用到的 series")
+    parser.add_argument('--prom-url', required=True, help="Prometheus URL, e.g. http://localhost:9090")
+    parser.add_argument('--start', required=False, help="start time (RFC3339或unix 秒)", default=None)
+    parser.add_argument('--end', required=False, help="end time (RFC3339或unix 秒)", default=None)
+    args = parser.parse_args()
+
+    prom = args.prom_url
+
+    # 设置时间范围，默认过去 1 小时
+    if args.end:
+        end = args.end
+    else:
+        end = datetime.utcnow()
+        end = end.isoformat() + "Z"
+    if args.start:
+        start = args.start
+    else:
+        start_dt = datetime.utcnow() - timedelta(hours=1)
+        start = start_dt.isoformat() + "Z"
+
+    groups = fetch_rules(prom)
+    alert_metrics = {}  # alert_name -> set of (metric,matcher) pairs
+
+    for grp in groups:
+        for rule in grp.get('rules', []):
+            if rule.get('alert'):
+                alert_name = rule['alert']
+                expr = rule.get('expr', '')
+                pairs = extract_metric_matchers(expr)
+                alert_metrics[alert_name] = pairs
+
+    # 然后查询 series
+    alert_series = {}  # alert_name -> list of series (dicts)
+    for alert, pairs in alert_metrics.items():
+        series_all = []
+        seen = set()
+        for (metric, matcher) in pairs:
+            key = metric + matcher
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                data = query_series(prom, metric, matcher, start, end)
+            except Exception as e:
+                print(f"Error querying series for {metric}{matcher}: {e}")
+                data = []
+            for s in data:
+                series_all.append(s)
+        alert_series[alert] = series_all
+
+    # 输出
+    for alert, series in alert_series.items():
+        print(f"Alert: {alert}")
+        print(f"  Matched series count: {len(series)}")
+        for s in series:
+            print("    ", s)
+        print("")
+
+if __name__ == "__main__":
+    main()
