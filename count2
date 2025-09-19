@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROM_URL="http://localhost:9090"   # 改成你的 Prometheus 地址
+
+# 计算时间参数：现在 和 一小时前
+END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+START_TIME=$(date -u -d '1 hour ago' +"%Y-%m-%dT%H:%M:%SZ")
+
+# 第一步：拿 alert rules
+RULES_JSON=$(curl -s "${PROM_URL}/api/v1/rules")
+
+# 提取 alert 名称 + expr
+alerts_and_exprs=$(echo "${RULES_JSON}" | \
+  jq -r '.data.groups[] .rules[] | select(.type=="alert") | "\(.alert)|\(.expr)"')
+
+# 主循环
+while IFS="|" read -r alert_name expr; do
+  echo "== Alert: ${alert_name} =="
+  # 提取 selector（metric +{…}）
+  selectors=$(echo "${expr}" | grep -oE '([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(\{[^}]*\})?')
+  
+  # 去空格，去重
+  echo "${selectors}" | sed 's/ //g' | sort -u > /tmp/selectors_${alert_name// /_}.txt
+
+  # 查询 series
+  while read -r selector; do
+    [ -z "$selector" ] && continue
+    echo "  Selector: ${selector}"
+    # URL encode selector (简单处理:)
+    sel_enc=$(printf "%s" "${selector}" | sed 's/{/%7B/g; s/}/%7D/g; s/,/%2C/g; s/=/\%3D/g; s/\"/%22/g; s/ /%20/g; s/~/%7E/g')
+    # 请求 series
+    curl -s "${PROM_URL}/api/v1/series?match[]=${sel_enc}&start=${START_TIME}&end=${END_TIME}" | \
+      jq -r --arg sel "$selector" '.data[] | "\($sel) => " + (to_entries | map("\(.key)=\(.value)") | join(","))'
+  done < /tmp/selectors_${alert_name// /_}.txt
+
+done <<< "${alerts_and_exprs}"
