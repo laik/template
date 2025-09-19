@@ -1,37 +1,134 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+import promql_parser
+from promql_parser import ast as p_ast
+from typing import List, Tuple, Dict, Any
 
-PROM_URL="http://localhost:9090"   # 改成你的 Prometheus 地址
+def extract_selectors(expr: p_ast.Expr) -> List[Dict[str, Any]]:
+    """
+    遍历 AST 提取所有 VectorSelector / MatrixSelector / SubqueryExpr 中
+    的 metric + matchers + （如果有的话）range / subquery 区段时间。
+    返回一个列表，每个元素类似：
+    {
+        "metric_name": "...",
+        "matchers": [ {"label":"job", "op":"=", "value":"foo"}, ... ],
+        "range": "5m" or None,   # range vector 上面的 [5m]
+        "subquery": {"duration": "10m", "step":"1m"} or None
+    }
+    """
+    selectors = []
 
-# 计算时间参数：现在 和 一小时前
-END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-START_TIME=$(date -u -d '1 hour ago' +"%Y-%m-%dT%H:%M:%SZ")
+    def walk(node):
+        # 如果是 VectorSelector
+        if isinstance(node, p_ast.VectorSelector):
+            sel = {
+                "metric_name": node.series,  # 名称
+                "matchers": [
+                    {"label": m.name, "op": str(m.op), "value": m.value}
+                    for m in node.matchers.matchers
+                ],
+                "range": None,
+                "subquery": None
+            }
+            selectors.append(sel)
 
-# 第一步：拿 alert rules
-RULES_JSON=$(curl -s "${PROM_URL}/api/v1/rules")
+        # 如果是 MatrixSelector（即 range vector）  
+        elif isinstance(node, p_ast.MatrixSelector):
+            # MatrixSelector 包含内层一个 VectorSelector + 一个 range duration
+            # inner 是 node.vector_selector (depends版本)
+            inner = node.vector_selector if hasattr(node, "vector_selector") else node.expr
+            sel = {
+                "metric_name": inner.series,
+                "matchers": [
+                    {"label": m.name, "op": str(m.op), "value": m.value}
+                    for m in inner.matchers.matchers
+                ],
+                "range": str(node.range),  # 例如 "5m"
+                "subquery": None
+            }
+            selectors.append(sel)
 
-# 提取 alert 名称 + expr
-alerts_and_exprs=$(echo "${RULES_JSON}" | \
-  jq -r '.data.groups[] .rules[] | select(.type=="alert") | "\(.alert)|\(.expr)"')
+        # 如果是 SubqueryExpr (PromQL 的子查询)
+        elif isinstance(node, p_ast.SubqueryExpr):
+            # SubqueryExpr 包含 inner expr + range + step + maybe offset
+            # inner expr 可以是 vector / matrix / or something
+            inner = node.expr
+            # we want to find any metric selectors inside inner, but annotate with subquery info
+            # To simplify, walk into inner and tag with subquery info
+            for child in [inner]:
+                # recursive walk, but pass along subquery info
+                walk_with_subquery(child, node)
 
-# 主循环
-while IFS="|" read -r alert_name expr; do
-  echo "== Alert: ${alert_name} =="
-  # 提取 selector（metric +{…}）
-  selectors=$(echo "${expr}" | grep -oE '([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(\{[^}]*\})?')
-  
-  # 去空格，去重
-  echo "${selectors}" | sed 's/ //g' | sort -u > /tmp/selectors_${alert_name// /_}.txt
+        # 对所有节点递归
+        for field, value in vars(node).items():
+            if isinstance(value, list):
+                for v in value:
+                    if isinstance(v, p_ast.Expr):
+                        walk(v)
+            elif isinstance(value, p_ast.Expr):
+                walk(value)
 
-  # 查询 series
-  while read -r selector; do
-    [ -z "$selector" ] && continue
-    echo "  Selector: ${selector}"
-    # URL encode selector (简单处理:)
-    sel_enc=$(printf "%s" "${selector}" | sed 's/{/%7B/g; s/}/%7D/g; s/,/%2C/g; s/=/\%3D/g; s/\"/%22/g; s/ /%20/g; s/~/%7E/g')
-    # 请求 series
-    curl -s "${PROM_URL}/api/v1/series?match[]=${sel_enc}&start=${START_TIME}&end=${END_TIME}" | \
-      jq -r --arg sel "$selector" '.data[] | "\($sel) => " + (to_entries | map("\(.key)=\(.value)") | join(","))'
-  done < /tmp/selectors_${alert_name// /_}.txt
+    def walk_with_subquery(node, subq: p_ast.SubqueryExpr):
+        # Similar to walk, but attach subquery info
+        if isinstance(node, p_ast.VectorSelector):
+            sel = {
+                "metric_name": node.series,
+                "matchers": [
+                    {"label": m.name, "op": str(m.op), "value": m.value}
+                    for m in node.matchers.matchers
+                ],
+                "range": None,
+                "subquery": {
+                    "duration": str(subq.range),
+                    "step": str(subq.step)
+                }
+            }
+            selectors.append(sel)
+        elif isinstance(node, p_ast.MatrixSelector):
+            inner = node.vector_selector if hasattr(node, "vector_selector") else node.expr
+            sel = {
+                "metric_name": inner.series,
+                "matchers": [
+                    {"label": m.name, "op": str(m.op), "value": m.value}
+                    for m in inner.matchers.matchers
+                ],
+                "range": str(node.range),
+                "subquery": {
+                    "duration": str(subq.range),
+                    "step": str(subq.step)
+                }
+            }
+            selectors.append(sel)
 
-done <<< "${alerts_and_exprs}"
+        # recurse deeper
+        for field, value in vars(node).items():
+            if isinstance(value, list):
+                for v in value:
+                    if isinstance(v, p_ast.Expr):
+                        walk_with_subquery(v, subq)
+            elif isinstance(value, p_ast.Expr):
+                walk_with_subquery(value, subq)
+
+    # 主流程
+    try:
+        ast = promql_parser.parse(expr_str)
+    except Exception as e:
+        print("Parse error:", e)
+        return []
+
+    walk(ast)
+    return selectors
+
+
+if __name__ == "__main__":
+    # 测试
+    expr_str_examples = [
+        'rate(http_requests_total{job="api-server",instance=~"node.*"}[5m])',
+        'sum by(instance)(irate(node_cpu_seconds_total{mode!="idle"}[1m])) / 100 > 0.5',
+        'http_requests_total{method="GET"} offset 10m'
+    ]
+    for expr_str in expr_str_examples:
+        print("Expr:", expr_str)
+        sels = extract_selectors(expr_str)
+        for s in sels:
+            print("  ->", s)
+        print()
