@@ -1,0 +1,1 @@
+alias kgp='kubectl get pods -o custom-columns="NAME:.metadata.name,CPU-REQ:.spec.containers[*].resources.requests.cpu,CPU-LIM:.spec.containers[*].resources.limits.cpu,MEM-REQ:.spec.containers[*].resources.requests.memory,MEM-LIM:.spec.containers[*].resources.limits.memory,IP:.status.podIP,NODE:.spec.nodeName,STATUS:.status.phase"'
