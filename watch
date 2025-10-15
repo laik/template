@@ -1,0 +1,7 @@
+watch() {
+    if [ $# -eq 0 ]; then
+        command watch
+    else
+        command watch "zsh -i -c '$@'"
+    fi
+}
