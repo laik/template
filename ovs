@@ -1,0 +1,8 @@
+# 针对高负载环境的优化配置
+sudo ovs-vsctl set Open_vSwitch . other_config:flow-limit=50000
+sudo ovs-vsctl set Open_vSwitch . other_config:max-idle=60000
+sudo ovs-vsctl set Open_vSwitch . other_config:min-revalidate-pps=2000
+
+# 额外的性能优化参数
+sudo ovs-vsctl set Open_vSwitch . other_config:flow-eviction-threshold=1000
+sudo ovs-vsctl set Open_vSwitch . other_config:n-flow-del-warn-threshold=5000
