@@ -1,1 +1,39 @@
 
+kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379 endpoint status --write-out=table
+kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379 member list
+
+
+```
+➜  etcd git:(main) ✗ kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379 member list
+63cdb3774b98cc2e, started, etcd-2, http://etcd-2.etcd:2380, http://etcd-2.etcd:2379, false
+69691ed70da97612, started, etcd-0, http://etcd-0.etcd:2380, http://etcd-0.etcd:2379, false
+7e44220b60d58d6a, started, etcd-1, http://etcd-1.etcd:2380, http://etcd-1.etcd:2379, false
+```
+
+
+
+
+kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379  move-leader 63cdb3774b98cc2e
+
+➜  etcd git:(main) ✗ kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379  move-leader 63cdb3774b98cc2e
+Leadership transferred from 69691ed70da97612 to 63cdb3774b98cc2e
+➜  etcd git:(main) ✗ kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379 member list
+63cdb3774b98cc2e, started, etcd-2, http://etcd-2.etcd:2380, http://etcd-2.etcd:2379, false
+69691ed70da97612, started, etcd-0, http://etcd-0.etcd:2380, http://etcd-0.etcd:2379, false
+7e44220b60d58d6a, started, etcd-1, http://etcd-1.etcd:2380, http://etcd-1.etcd:2379, false
+➜  etcd git:(main) ✗
+➜  etcd git:(main) ✗
+➜  etcd git:(main) ✗ kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://etcd-0.etcd:2379,http://etcd-1.etcd:2379,http://etcd-2.etcd:2379 endpoint status --write-out=table
++-------------------------+------------------+---------+---------+-----------+------------+-----------+------------+--------------------+--------+
+|        ENDPOINT         |        ID        | VERSION | DB SIZE | IS LEADER | IS LEARNER | RAFT TERM | RAFT INDEX | RAFT APPLIED INDEX | ERRORS |
++-------------------------+------------------+---------+---------+-----------+------------+-----------+------------+--------------------+--------+
+| http://etcd-0.etcd:2379 | 69691ed70da97612 |  3.5.10 |   20 kB |     false |      false |         3 |         12 |                 12 |        |
+| http://etcd-1.etcd:2379 | 7e44220b60d58d6a |  3.5.10 |   20 kB |     false |      false |         3 |         12 |                 12 |        |
+| http://etcd-2.etcd:2379 | 63cdb3774b98cc2e |  3.5.10 |   20 kB |      true |      false |         3 |         12 |                 12 |        |
++-------------------------+------------------+---------+---------+-----------+------------+-----------+------------+--------------------+--------+
+➜  etcd git:(main) ✗
+
+
+kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://etcd-0.etcd:2379,http://etcd-1.etcd:2379,http://etcd-2.etcd:2379 endpoint status --write-out=table
+
+kubectl -n kube-etcd exec etcd-0 -- etcdctl --endpoints=http://localhost:2379 endpoint health --write-out=table
